@@ -35,11 +35,21 @@ class OrderExecutor:
     # Track last grid center price per symbol for smart cancel logic
     _last_grid_prices = {}
 
+    # Track B1 price per symbol for the 4% drop safety rule
+    _grid_b1_prices = {}
+
+    # Symbols currently in WAIT mode due to 4% drop safety rule
+    _safety_wait_symbols = set()
+
     # Only cancel + re-place if price moved significantly from last grid center.
     # Higher threshold = orders sit longer = more chance to fill.
-    # With 3 levels at 0.50% spacing, the furthest order is 1.5% away.
+    # With 5 levels at 1.0% spacing, the furthest order is 5.0% away.
     # Only re-place if price moved enough that the grid is stale.
-    SMART_CANCEL_THRESHOLD_PCT = 1.5
+    SMART_CANCEL_THRESHOLD_PCT = 2.5
+
+    # Safety rule: if price drops this % below B1, cancel all buys and WAIT.
+    # Prevents catching a falling knife during dumps/rugs.
+    DROP_SAFETY_PCT = 4.0
 
     def __init__(self, client, risk_manager, fill_tracker=None):
         """
@@ -189,6 +199,61 @@ class OrderExecutor:
 
             # Record the price we're placing the grid around
             self._last_grid_prices[symbol] = current_price
+
+        # ----- 4% DROP SAFETY RULE -----
+        # If price has dropped more than 4% below B1, cancel all buys and go to WAIT.
+        # This prevents the bot from catching a falling knife during dumps.
+        b1_price = grid_levels["buy_levels"][0]["price"] if grid_levels["buy_levels"] else None
+        if b1_price and not self.paper_mode:
+            # Check if this symbol was previously in safety-wait
+            if symbol in self._safety_wait_symbols:
+                # Re-entry condition: price must be ABOVE B1 (recovered from the drop)
+                if current_price >= b1_price:
+                    self._safety_wait_symbols.discard(symbol)
+                    logger.info(
+                        f"[SAFETY] {symbol} recovered above B1 (${b1_price:.8f}) — "
+                        f"re-entering grid."
+                    )
+                else:
+                    logger.info(
+                        f"[SAFETY] {symbol} still in WAIT — price ${current_price:.8f} "
+                        f"below B1 ${b1_price:.8f}"
+                    )
+                    return {
+                        "action": "WAIT",
+                        "paper_mode": self.paper_mode,
+                        "orders": [],
+                        "summary": (
+                            f"SAFETY WAIT — {symbol} price still below B1. "
+                            f"Waiting for recovery above ${b1_price:.8f}."
+                        ),
+                    }
+
+            # Check if price has dropped 4%+ below B1
+            drop_from_b1 = (b1_price - current_price) / b1_price * 100
+            if drop_from_b1 >= self.DROP_SAFETY_PCT:
+                logger.warning(
+                    f"[SAFETY] {symbol} dropped {drop_from_b1:.2f}% below B1 "
+                    f"(${b1_price:.8f} → ${current_price:.8f}) — "
+                    f"cancelling buys, entering WAIT mode."
+                )
+                # Cancel all open orders for this symbol
+                cancelled = self.client.cancel_open_orders(product_id=symbol)
+                if cancelled > 0:
+                    logger.info(f"[SAFETY] Cancelled {cancelled} open {symbol} orders")
+
+                self._safety_wait_symbols.add(symbol)
+                self._last_grid_prices.pop(symbol, None)  # reset grid center
+
+                return {
+                    "action": "WAIT",
+                    "paper_mode": self.paper_mode,
+                    "orders": [],
+                    "summary": (
+                        f"SAFETY STOP — {symbol} dropped {drop_from_b1:.1f}% below B1. "
+                        f"Cancelled {cancelled} orders. Waiting for recovery."
+                    ),
+                }
 
         # ----- Check actual holdings before placing orders -----
         # Get available cash (for buys) and coin balance (for sells)

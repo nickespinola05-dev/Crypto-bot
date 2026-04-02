@@ -150,11 +150,10 @@ class FillTracker:
 
                 # Calculate sell target:
                 # Need to cover: 0.40% maker fee on buy + 0.40% maker fee on sell = 0.80%
-                # Plus a profit margin of ~0.20%
-                # Total spread needed: ~1.00% above buy price
-                # Using spacing as base, minimum 1.0% spread
-                spacing = info.get("grid_spacing_pct", 0.50)
-                min_spread_pct = 1.0  # minimum 1.0% above buy to guarantee profit
+                # Plus minimum 1.8% net profit per round-trip
+                # Total spread needed: 1.80% + 0.80% = 2.60% above buy price
+                spacing = info.get("grid_spacing_pct", 1.0)
+                min_spread_pct = 2.6  # guarantees 1.8% net after 0.80% fees
                 sell_spread = max(spacing * 2, min_spread_pct)
                 sell_price = info["price"] * (1 + sell_spread / 100)
 
@@ -191,7 +190,7 @@ class FillTracker:
                 # Calculate realized profit
                 buy_cost = info["buy_price"] * info["size_coins"]
                 sell_revenue = info["price"] * info["size_coins"]
-                est_fees = (buy_cost + sell_revenue) * 0.005  # ~0.5% per side
+                est_fees = (buy_cost + sell_revenue) * 0.004  # ~0.40% maker fee per side
                 profit = sell_revenue - buy_cost - est_fees
 
                 results["profit_this_cycle"] += profit

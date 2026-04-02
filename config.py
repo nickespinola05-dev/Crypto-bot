@@ -34,7 +34,7 @@ class Settings:
         ).replace("\\n", "\n")  # Handle escaped newlines in .env
 
         # --- Trading pairs ---
-        raw_pairs = os.getenv("TRADING_PAIRS", "DOGE-USD")
+        raw_pairs = os.getenv("TRADING_PAIRS", "DOGE-USDC")
         self.TRADING_PAIRS: list[str] = [
             p.strip() for p in raw_pairs.split(",") if p.strip()
         ]

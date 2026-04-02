@@ -31,27 +31,27 @@ class GridStrategy:
     """
 
     # How many grid lines on each side of the current price
-    # Fewer levels = more capital per order = faster fills
-    NUM_LEVELS = 3
+    # More levels = wider net to catch price swings
+    NUM_LEVELS = 5
 
     # ATR multiplier: grid_spacing = ATR% * this value
-    ATR_MULTIPLIER_RANGING = 1.2    # Slightly wider than ATR when ranging
-    ATR_MULTIPLIER_TRENDING = 1.8   # Wider when trending
+    ATR_MULTIPLIER_RANGING = 2.0    # 2× ATR when ranging — wider for safety
+    ATR_MULTIPLIER_TRENDING = 3.0   # 3× ATR when trending — extra room for swings
 
     # Min/max spacing to prevent crazy values
-    # Min = 0.50%: with 0.40% maker fees per side (0.80% round-trip),
-    # counter-sell at buy+1.0% gives 0.20% net profit per round-trip.
-    # Fills often because B1 is only 0.50% below market.
-    MIN_SPACING_PCT = 0.50  # Just above fees — optimized for fill frequency
-    MAX_SPACING_PCT = 4.0   # Cap for extreme volatility
+    # Ranging min = 1.0%: counter-sell at buy+2.6% gives 1.8% net after 0.80% fees
+    # Trending min = 1.5%: even wider floor when price is directional
+    MIN_SPACING_PCT = 1.0   # Ranging floor — safe profit margin per round-trip
+    MIN_SPACING_TRENDING_PCT = 1.5  # Trending floor — wider to avoid whipsaws
+    MAX_SPACING_PCT = 5.0   # Cap for extreme volatility
 
     # Estimated Coinbase fee per side (maker ~0.40%)
     # Limit orders = maker fees on both buy and sell
     FEE_PER_SIDE_PCT = 0.40
 
     # What fraction of max capital to use per coin
-    # 3 coins × 0.28 = 84% deployed, 16% reserve
-    CAPITAL_FRACTION = 0.28
+    # 4 coins × 0.20 = 80% deployed, 20% reserve
+    CAPITAL_FRACTION = 0.20
 
     def __init__(
         self,
@@ -107,13 +107,15 @@ class GridStrategy:
         # ----- Step 1: Calculate dynamic grid spacing -----
         if self.regime == "TRENDING":
             multiplier = self.ATR_MULTIPLIER_TRENDING
+            min_floor = self.MIN_SPACING_TRENDING_PCT
         else:
             multiplier = self.ATR_MULTIPLIER_RANGING
+            min_floor = self.MIN_SPACING_PCT
 
         spacing_pct = self.atr_pct * multiplier
 
-        # Clamp to min/max bounds
-        spacing_pct = max(self.MIN_SPACING_PCT, min(self.MAX_SPACING_PCT, spacing_pct))
+        # Clamp to min/max bounds (trending has a higher floor)
+        spacing_pct = max(min_floor, min(self.MAX_SPACING_PCT, spacing_pct))
 
         # Convert to dollar amount
         spacing_usd = self.current_price * (spacing_pct / 100)
