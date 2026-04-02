@@ -37,6 +37,7 @@ class RiskManager:
         self.max_position_pct = settings.MAX_POSITION_PCT
         self.daily_loss_limit_pct = settings.DAILY_LOSS_LIMIT_PCT
         self.max_drawdown_pct = settings.MAX_DRAWDOWN_PCT
+        self.aggressive_mode = getattr(settings, 'AGGRESSIVE_MODE', False)
 
         logger.info(
             f"RiskManager initialized — "
@@ -44,6 +45,20 @@ class RiskManager:
             f"daily loss limit: {self.daily_loss_limit_pct}%, "
             f"max drawdown: {self.max_drawdown_pct}%"
         )
+
+        if self.aggressive_mode:
+            logger.warning(
+                "AGGRESSIVE MODE ENABLED — 45% per coin, 8% daily loss, 20% drawdown"
+            )
+
+    def print_aggressive_warning(self):
+        """Print prominent aggressive mode warning at startup."""
+        if self.aggressive_mode:
+            print("\n" + "!" * 60)
+            print("!  AGGRESSIVE MODE ENABLED                                 !")
+            print("!  45% per coin | 8% daily loss | 20% max drawdown         !")
+            print("!  Higher risk / higher reward — monitor closely            !")
+            print("!" * 60 + "\n")
 
     # ------------------------------------------------------------------
     #  CHECK 1: Daily Loss

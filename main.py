@@ -293,10 +293,17 @@ def _run_pair_cycle(symbol: str, cycle_start, live_equity: float, live_equity_in
 
     try:
         # ----- Fetch candles -----
-        # Candle data: use -USD version (Coinbase has more liquidity/data on USD pairs)
-        # Orders will go through the actual symbol (e.g. DOGE-USDC) so they match your balance
+        # Try -USD first (more liquidity/data), fall back to original symbol (e.g. SIREN-USDC)
         candle_symbol = symbol.replace("-USDC", "-USD").replace("-USDT", "-USD")
-        df_raw = fetcher.get_recent_candles(candle_symbol, granularity="FIVE_MINUTE", limit=100)
+        try:
+            df_raw = fetcher.get_recent_candles(candle_symbol, granularity="FIVE_MINUTE", limit=100)
+            if df_raw is None or len(df_raw) < 30:
+                raise ValueError(f"Not enough candles from {candle_symbol} ({len(df_raw) if df_raw is not None else 0})")
+        except Exception:
+            # Fallback: use the USDC pair directly (needed for coins without USD pairs like SIREN)
+            logger.info(f"Candle fallback: {candle_symbol} failed, trying {symbol} directly")
+            candle_symbol = symbol
+            df_raw = fetcher.get_recent_candles(candle_symbol, granularity="FIVE_MINUTE", limit=100)
 
         # ----- Add technical indicators -----
         df = add_indicators(df_raw)
@@ -520,6 +527,10 @@ def _run_pair_cycle(symbol: str, cycle_start, live_equity: float, live_equity_in
         total_exposure = pos_mgr.calculate_total_exposure(positions)
         current_equity = equity_info["total_equity"]
 
+        # Per-coin exposure for risk check (not total across all coins)
+        base_currency = symbol.split("-")[0]
+        coin_exposure = positions.get(base_currency, {}).get("value_usd", 0.0)
+
         if start_of_day_equity_global is None:
             start_of_day_equity_global = current_equity
 
@@ -536,6 +547,7 @@ def _run_pair_cycle(symbol: str, cycle_start, live_equity: float, live_equity_in
               f"daily P&L {risk['daily_pnl_pct']:+.2f}%, "
               f"drawdown {risk['drawdown_pct']:.2f}% — "
               f"{'OK' if risk['trading_allowed'] else 'BLOCKED'}")
+        print(f"  {symbol} coin exposure: ${coin_exposure:.2f}")
 
         if not risk["trading_allowed"]:
             alerts.send_risk_alert(
@@ -554,7 +566,7 @@ def _run_pair_cycle(symbol: str, cycle_start, live_equity: float, live_equity_in
                 symbol=symbol,
                 grid_levels=grid_levels,
                 current_equity=current_equity,
-                current_exposure=total_exposure,
+                current_exposure=coin_exposure,
             )
         else:
             exec_result = {
@@ -851,6 +863,15 @@ if __name__ == "__main__":
     print("#   BOT FULLY ARMED — PAPER/LIVE READY                   #")
     print("#" + " " * 58 + "#")
     print("#" * 60)
+
+    if getattr(settings, 'AGGRESSIVE_MODE', False):
+        print("\n" + "!" * 60)
+        print("!  AGGRESSIVE MODE ENABLED                                 !")
+        print("!  45% per coin | 7 grid levels | 0.40% min spacing        !")
+        print("!  Scalp threshold: 0.55 | Aggressive scalp: 0.80 (60%)   !")
+        print("!  Daily loss: 8% | Max drawdown: 20%                      !")
+        print("!  Higher risk / higher reward -- monitor closely           !")
+        print("!" * 60)
 
     print(f"\n  Mode              : {mode_str}")
     print(f"  Telegram alerts   : {tg_str}")

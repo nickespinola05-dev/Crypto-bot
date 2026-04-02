@@ -30,28 +30,32 @@ class GridStrategy:
            and widens slightly as a safety buffer
     """
 
-    # How many grid lines on each side of the current price
-    # More levels = wider net to catch price swings
-    NUM_LEVELS = 5
+    # -----------------------------------------------------------
+    #  AGGRESSIVE MODE PARAMETERS
+    # -----------------------------------------------------------
+
+    # 7 levels per side = dense grid that catches every micro-bounce
+    NUM_LEVELS = 7
 
     # ATR multiplier: grid_spacing = ATR% * this value
-    ATR_MULTIPLIER_RANGING = 2.0    # 2× ATR when ranging — wider for safety
-    ATR_MULTIPLIER_TRENDING = 3.0   # 3× ATR when trending — extra room for swings
+    # 1.0× ATR in ranging = grid tracks volatility 1:1, maximum fill frequency
+    # 1.5× ATR in trending = slightly wider but still aggressive
+    ATR_MULTIPLIER_RANGING = 1.0
+    ATR_MULTIPLIER_TRENDING = 1.5
 
-    # Min/max spacing to prevent crazy values
-    # Ranging min = 1.0%: counter-sell at buy+2.6% gives 1.8% net after 0.80% fees
-    # Trending min = 1.5%: even wider floor when price is directional
-    MIN_SPACING_PCT = 1.0   # Ranging floor — safe profit margin per round-trip
-    MIN_SPACING_TRENDING_PCT = 1.5  # Trending floor — wider to avoid whipsaws
-    MAX_SPACING_PCT = 5.0   # Cap for extreme volatility
+    # Min/max spacing
+    # 0.40% min: with 0.40% maker fees per side (0.80% round-trip),
+    # counter-sell at buy+1.2% gives 0.40% net profit — thin but fills FAST
+    MIN_SPACING_PCT = 0.40   # Aggressive floor — tight grid, high frequency
+    MIN_SPACING_TRENDING_PCT = 0.60  # Slightly wider when trending
+    MAX_SPACING_PCT = 3.0    # Tighter cap — we want density, not distance
 
     # Estimated Coinbase fee per side (maker ~0.40%)
-    # Limit orders = maker fees on both buy and sell
     FEE_PER_SIDE_PCT = 0.40
 
     # What fraction of max capital to use per coin
-    # 4 coins × 0.20 = 80% deployed, 20% reserve
-    CAPITAL_FRACTION = 0.20
+    # 4 coins × 0.22 = 88% deployed, 12% reserve — aggressive capital usage
+    CAPITAL_FRACTION = 0.22
 
     def __init__(
         self,
@@ -97,11 +101,11 @@ class GridStrategy:
                 regime:                  str ("RANGING" or "TRENDING")
                 grid_spacing_pct:        float (spacing as percentage)
                 grid_spacing_usd:        float (spacing in USD)
-                buy_levels:              list of 5 dicts (level, price, size_usd, size_coins)
-                sell_levels:             list of 5 dicts (level, price, size_usd, size_coins)
+                buy_levels:              list of 7 dicts (level, price, size_usd, size_coins)
+                sell_levels:             list of 7 dicts (level, price, size_usd, size_coins)
                 capital_per_level:       float (USD allocated to each grid line)
                 total_capital_deployed:  float (total USD across all buy levels)
-                est_profit_per_cycle:    float (profit if ALL 5 buy+sell pairs fill once)
+                est_profit_per_cycle:    float (profit if ALL 7 buy+sell pairs fill once)
                 est_profit_pct:          float (profit as % of deployed capital)
         """
         # ----- Step 1: Calculate dynamic grid spacing -----
@@ -124,7 +128,7 @@ class GridStrategy:
         # Total capital for this coin = max position * fraction
         total_for_coin = self.capital_usd * self.CAPITAL_FRACTION
 
-        # Split equally across the 5 buy levels
+        # Split equally across all buy levels
         capital_per_level = total_for_coin / self.NUM_LEVELS
 
         # ----- Step 3: Calculate buy levels (below current price) -----
@@ -162,7 +166,7 @@ class GridStrategy:
             )
 
         # ----- Step 5: Estimate profit per full cycle (FEE-AWARE) -----
-        # A "cycle" = all 5 buys fill, then all 5 sells fill
+        # A "cycle" = all 7 buys fill, then all 7 sells fill
         total_buy_cost = sum(b["size_usd"] for b in buy_levels)
         total_sell_revenue = sum(s["size_usd"] for s in sell_levels)
 

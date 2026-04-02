@@ -1,17 +1,18 @@
 """
 strategies/hybrid_strategy.py — The master brain that switches between strategies.
 
-This is the core of the bot. It combines:
+AGGRESSIVE MODE — This is the core of the bot. It combines:
     - Regime classifier (RANGING vs TRENDING)
     - Grid strategy (profit from sideways bouncing)
     - Momentum predictor (which direction, how strong)
 
-And decides: should we run the GRID, SCALP a breakout, or WAIT?
+And decides: should we run the GRID, SCALP, AGGRESSIVE SCALP, or WAIT?
 
-Decision logic:
+Decision logic (AGGRESSIVE):
     RANGING regime                       → GRID  (place buy/sell grid)
-    TRENDING + momentum > 0.65           → SCALP (ride the breakout)
-    TRENDING + momentum <= 0.65          → WAIT  (trend exists but too weak)
+    TRENDING + momentum >= 0.55          → SCALP (ride the breakout)
+    TRENDING + momentum >= 0.80          → AGGRESSIVE SCALP (60% capital, ride hard)
+    TRENDING + momentum < 0.55           → WAIT  (trend exists but too weak)
 
 Usage:
     from strategies.hybrid_strategy import HybridStrategy
@@ -27,10 +28,14 @@ from utils.logger import logger
 class HybridStrategy:
     """
     Master decision engine — picks the right strategy for the current market.
+    AGGRESSIVE MODE: lower scalp threshold, aggressive scalp at high momentum.
     """
 
-    # Minimum momentum score to activate scalping
-    SCALP_THRESHOLD = 0.65
+    # Minimum momentum score to activate standard scalping (lowered from 0.65)
+    SCALP_THRESHOLD = 0.55
+
+    # Momentum score for AGGRESSIVE SCALP mode — doubles position, up to 60% capital
+    AGGRESSIVE_SCALP_THRESHOLD = 0.80
 
     def __init__(
         self,
@@ -97,15 +102,37 @@ class HybridStrategy:
             )
             return decision
 
-        # ----- Decision 2: TRENDING + strong momentum → scalp -----
+        # ----- Decision 2: TRENDING + very strong momentum → AGGRESSIVE SCALP -----
+        if self.regime == "TRENDING" and score >= self.AGGRESSIVE_SCALP_THRESHOLD:
+            scalp_plan = self._build_scalp_plan(direction, aggressive=True)
+            decision = {
+                "decision": "SCALP",
+                "reason": (
+                    f"AGGRESSIVE SCALP! Market is TRENDING "
+                    f"(confidence: {self.regime_confidence:.0%}) "
+                    f"with VERY STRONG {direction} momentum (score: {score:.2f}). "
+                    f"Doubling position size — up to 60% capital on this coin. "
+                    f"High conviction breakout trade."
+                ),
+                "details": scalp_plan,
+            }
+            logger.info(
+                f"Decision: AGGRESSIVE SCALP — {direction} breakout, "
+                f"momentum {score:.2f} (>= {self.AGGRESSIVE_SCALP_THRESHOLD}), "
+                f"target: ${scalp_plan['target_price']:.10f}, "
+                f"2x position size"
+            )
+            return decision
+
+        # ----- Decision 3: TRENDING + decent momentum → standard scalp -----
         if self.regime == "TRENDING" and score >= self.SCALP_THRESHOLD:
-            scalp_plan = self._build_scalp_plan(direction)
+            scalp_plan = self._build_scalp_plan(direction, aggressive=False)
             decision = {
                 "decision": "SCALP",
                 "reason": (
                     f"Market is TRENDING (confidence: {self.regime_confidence:.0%}) "
-                    f"with strong {direction} momentum (score: {score:.2f}). "
-                    f"Switching to aggressive scalping to ride the breakout."
+                    f"with {direction} momentum (score: {score:.2f}). "
+                    f"Scalping the breakout at standard size."
                 ),
                 "details": scalp_plan,
             }
@@ -116,7 +143,7 @@ class HybridStrategy:
             )
             return decision
 
-        # ----- Decision 3: TRENDING but weak momentum → wait -----
+        # ----- Decision 4: TRENDING but weak momentum → wait -----
         decision = {
             "decision": "WAIT",
             "reason": (
@@ -142,43 +169,48 @@ class HybridStrategy:
         )
         return decision
 
-    def _build_scalp_plan(self, direction: str) -> dict:
+    def _build_scalp_plan(self, direction: str, aggressive: bool = False) -> dict:
         """
         Build a scalp trade plan: entry, target, and stop loss.
 
         Uses ATR to set realistic targets:
             - Entry:  current price
-            - Target: 2x ATR in the momentum direction
+            - Target: 2x ATR in the momentum direction (3x if aggressive)
             - Stop:   1x ATR against the momentum direction
-        This gives a 2:1 reward-to-risk ratio.
+        Standard gives 2:1 R:R, aggressive gives 3:1 R:R with 2x size.
         """
         atr_usd = self.current_price * (self.atr_pct / 100)
 
+        # Aggressive scalps reach further — 3× ATR target instead of 2×
+        target_mult = 3.0 if aggressive else 2.0
+
         if direction == "bullish":
             entry_price = self.current_price
-            target_price = self.current_price + (atr_usd * 2)
+            target_price = self.current_price + (atr_usd * target_mult)
             stop_price = self.current_price - (atr_usd * 1)
             side = "BUY"
         else:
             # Bearish — we don't short (spot only), so we SELL existing holdings
-            # or skip. For now, we plan a "sell high, buy back lower" approach.
             entry_price = self.current_price
-            target_price = self.current_price - (atr_usd * 2)
+            target_price = self.current_price - (atr_usd * target_mult)
             stop_price = self.current_price + (atr_usd * 1)
             side = "SELL"
 
         potential_profit_pct = abs(target_price - entry_price) / entry_price * 100
         potential_loss_pct = abs(stop_price - entry_price) / entry_price * 100
+        rr = f"{target_mult:.0f}:1"
 
         return {
             "strategy": "scalp",
+            "aggressive": aggressive,
             "side": side,
             "direction": direction,
             "entry_price": entry_price,
             "target_price": target_price,
             "stop_price": stop_price,
-            "risk_reward_ratio": "2:1",
+            "risk_reward_ratio": rr,
             "potential_profit_pct": round(potential_profit_pct, 3),
             "potential_loss_pct": round(potential_loss_pct, 3),
             "atr_used": round(atr_usd, 10),
+            "position_multiplier": 2.0 if aggressive else 1.0,
         }

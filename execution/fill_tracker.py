@@ -148,13 +148,13 @@ class FillTracker:
                              f"{info['symbol']} @ ${info['price']:.8f}")
                 results["buys_filled"] += 1
 
-                # Calculate sell target:
+                # Calculate sell target (AGGRESSIVE MODE):
                 # Need to cover: 0.40% maker fee on buy + 0.40% maker fee on sell = 0.80%
-                # Plus minimum 1.8% net profit per round-trip
-                # Total spread needed: 1.80% + 0.80% = 2.60% above buy price
-                spacing = info.get("grid_spacing_pct", 1.0)
-                min_spread_pct = 2.6  # guarantees 1.8% net after 0.80% fees
-                sell_spread = max(spacing * 2, min_spread_pct)
+                # Aggressive minimum: 1.20% spread → 0.40% net profit (thin but fast fills)
+                # Formula: counter-sell = max(spacing × 3, 1.20%) above buy price
+                spacing = info.get("grid_spacing_pct", 0.40)
+                min_spread_pct = 1.2  # 0.40% net after 0.80% fees — aggressive
+                sell_spread = max(spacing * 3, min_spread_pct)
                 sell_price = info["price"] * (1 + sell_spread / 100)
 
                 # Place the matching sell order

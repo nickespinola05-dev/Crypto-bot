@@ -49,16 +49,19 @@ class Settings:
             os.getenv("PAPER_TRADING", "true").lower() == "true"
         )
 
-        # --- Risk Management ---
+        # --- Risk Management (AGGRESSIVE MODE) ---
         self.MAX_POSITION_PCT: float = float(
-            os.getenv("MAX_POSITION_PCT", "25.0")
+            os.getenv("MAX_POSITION_PCT", "45.0")
         )
         self.DAILY_LOSS_LIMIT_PCT: float = float(
-            os.getenv("DAILY_LOSS_LIMIT_PCT", "5.0")
+            os.getenv("DAILY_LOSS_LIMIT_PCT", "8.0")
         )
         self.MAX_DRAWDOWN_PCT: float = float(
-            os.getenv("MAX_DRAWDOWN_PCT", "15.0")
+            os.getenv("MAX_DRAWDOWN_PCT", "20.0")
         )
+
+        # --- Aggressive Mode Flag ---
+        self.AGGRESSIVE_MODE: bool = True
 
         # --- Telegram Alerts ---
         self.TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")

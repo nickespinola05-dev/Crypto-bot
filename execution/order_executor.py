@@ -42,10 +42,9 @@ class OrderExecutor:
     _safety_wait_symbols = set()
 
     # Only cancel + re-place if price moved significantly from last grid center.
-    # Higher threshold = orders sit longer = more chance to fill.
-    # With 5 levels at 1.0% spacing, the furthest order is 5.0% away.
-    # Only re-place if price moved enough that the grid is stale.
-    SMART_CANCEL_THRESHOLD_PCT = 2.5
+    # AGGRESSIVE: lower threshold = re-center grid faster = always near the action.
+    # With 7 levels at 0.40% spacing, the furthest order is 2.8% away.
+    SMART_CANCEL_THRESHOLD_PCT = 1.2
 
     # Safety rule: if price drops this % below B1, cancel all buys and WAIT.
     # Prevents catching a falling knife during dumps/rugs.
@@ -371,10 +370,19 @@ class OrderExecutor:
 
         side = scalp_plan.get("side", "BUY")
         entry_price = scalp_plan["entry_price"]
+        is_aggressive = scalp_plan.get("aggressive", False)
+        position_mult = scalp_plan.get("position_multiplier", 1.0)
 
-        # For scalp, use a fraction of the grid capital
-        # (25% of max position = same as one grid level set)
-        scalp_usd = settings.MAX_POSITION_SIZE_USD * 0.25
+        # Standard scalp: 25% of equity
+        # Aggressive scalp (momentum >= 0.80): 60% of equity — high conviction
+        if is_aggressive:
+            scalp_usd = current_equity * 0.60  # up to 60% on a single aggressive scalp
+            logger.info(
+                f"AGGRESSIVE SCALP: using 60% of equity = ${scalp_usd:.2f} "
+                f"(position_mult: {position_mult}x)"
+            )
+        else:
+            scalp_usd = current_equity * 0.25  # standard 25%
         scalp_coins = scalp_usd / entry_price
 
         # Risk check
