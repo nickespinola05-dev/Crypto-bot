@@ -1,0 +1,34 @@
+# ============================================================
+# Hybrid Grid + Momentum Switch - Crypto Bot
+# Requirements (latest stable versions as of April 2026)
+# ============================================================
+
+# --- Coinbase Official SDK ---
+coinbase-advanced-py==1.8.2
+
+# --- Data & Analysis ---
+pandas==2.2.3
+numpy==2.1.3
+
+# --- Environment & Config ---
+python-dotenv==1.0.1
+
+# --- Logging ---
+loguru==0.7.3
+
+# --- HTTP (used internally by SDK, pinning for stability) ---
+requests==2.32.3
+
+# --- Scheduling ---
+schedule==1.2.2
+
+# --- ML (will be used in later steps) ---
+scikit-learn==1.6.1
+ta==0.11.0            # Technical Analysis library
+
+# --- Dashboard ---
+streamlit>=1.32.0
+plotly>=5.18.0
+
+# --- Utilities ---
+python-dateutil==2.9.0
