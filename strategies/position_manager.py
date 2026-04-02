@@ -76,7 +76,8 @@ class PositionManager:
                 continue
 
             # Try to get a current price for this coin
-            # Try USDC pair first (what we actually trade), then fall back to USD
+            # Method 1: candles (USDC then USD)
+            # Method 2: product ticker (fallback if candles return nothing)
             current_price = 0.0
             for quote in ("USDC", "USD"):
                 product_id = f"{currency}-{quote}"
@@ -91,6 +92,20 @@ class PositionManager:
                         break
                 except Exception:
                     continue
+
+            # Fallback: use get_product API for the current price
+            if current_price <= 0:
+                for quote in ("USDC", "USD"):
+                    product_id = f"{currency}-{quote}"
+                    try:
+                        product = self.client.client.get_product(product_id)
+                        p = float(getattr(product, 'price', 0) or 0)
+                        if p > 0:
+                            current_price = p
+                            logger.info(f"  Price fallback (ticker) for {product_id}: ${p:.10f}")
+                            break
+                    except Exception:
+                        continue
 
             value_usd = total_coins * current_price
 
