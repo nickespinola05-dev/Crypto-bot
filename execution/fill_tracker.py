@@ -148,9 +148,15 @@ class FillTracker:
                              f"{info['symbol']} @ ${info['price']:.8f}")
                 results["buys_filled"] += 1
 
-                # Calculate sell target: buy_price * (1 + 2*spacing) to cover fees + profit
-                spacing = info.get("grid_spacing_pct", 1.0)
-                sell_price = info["price"] * (1 + 2 * spacing / 100)
+                # Calculate sell target:
+                # Need to cover: 0.40% maker fee on buy + 0.40% maker fee on sell = 0.80%
+                # Plus a profit margin of ~0.20%
+                # Total spread needed: ~1.00% above buy price
+                # Using spacing as base, minimum 1.0% spread
+                spacing = info.get("grid_spacing_pct", 0.50)
+                min_spread_pct = 1.0  # minimum 1.0% above buy to guarantee profit
+                sell_spread = max(spacing * 2, min_spread_pct)
+                sell_price = info["price"] * (1 + sell_spread / 100)
 
                 # Place the matching sell order
                 sell_order_id = self._place_counter_sell(

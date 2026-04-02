@@ -31,27 +31,27 @@ class GridStrategy:
     """
 
     # How many grid lines on each side of the current price
-    NUM_LEVELS = 5
+    # Fewer levels = more capital per order = faster fills
+    NUM_LEVELS = 3
 
     # ATR multiplier: grid_spacing = ATR% * this value
-    # Example: if ATR% = 1.5% and multiplier = 1.0, spacing = 1.5%
-    ATR_MULTIPLIER_RANGING = 1.0    # Tight grid when ranging
-    ATR_MULTIPLIER_TRENDING = 1.5   # Wider grid when trending (safety buffer)
+    ATR_MULTIPLIER_RANGING = 1.2    # Slightly wider than ATR when ranging
+    ATR_MULTIPLIER_TRENDING = 1.8   # Wider when trending
 
     # Min/max spacing to prevent crazy values
-    # IMPORTANT: Min must exceed round-trip Coinbase fees (~0.80-1.20%)
-    # to guarantee every filled pair is profitable.
-    MIN_SPACING_PCT = 0.80  # Must be wider than fees to profit
-    MAX_SPACING_PCT = 5.0   # Never wider than 5%
+    # Min = 0.50%: with 0.40% maker fees per side (0.80% round-trip),
+    # counter-sell at buy+1.0% gives 0.20% net profit per round-trip.
+    # Fills often because B1 is only 0.50% below market.
+    MIN_SPACING_PCT = 0.50  # Just above fees — optimized for fill frequency
+    MAX_SPACING_PCT = 4.0   # Cap for extreme volatility
 
-    # Estimated Coinbase fee per side (maker ~0.40%, taker ~0.60%)
-    # Used to calculate realistic profit estimates
-    FEE_PER_SIDE_PCT = 0.50  # conservative average
+    # Estimated Coinbase fee per side (maker ~0.40%)
+    # Limit orders = maker fees on both buy and sell
+    FEE_PER_SIDE_PCT = 0.40
 
     # What fraction of max capital to use per coin
-    # With 3 coins at 0.25 each, we deploy ~75% total (25% safety reserve)
-    # Reserve ensures we always have cash for counter-sells to work
-    CAPITAL_FRACTION = 0.25
+    # 3 coins × 0.28 = 84% deployed, 16% reserve
+    CAPITAL_FRACTION = 0.28
 
     def __init__(
         self,

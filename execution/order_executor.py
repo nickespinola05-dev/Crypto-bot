@@ -35,9 +35,11 @@ class OrderExecutor:
     # Track last grid center price per symbol for smart cancel logic
     _last_grid_prices = {}
 
-    # Only cancel + re-place if price moved more than this % from last grid
-    # Must be tighter than grid spacing so orders don't drift away from market
-    SMART_CANCEL_THRESHOLD_PCT = 0.4
+    # Only cancel + re-place if price moved significantly from last grid center.
+    # Higher threshold = orders sit longer = more chance to fill.
+    # With 3 levels at 0.50% spacing, the furthest order is 1.5% away.
+    # Only re-place if price moved enough that the grid is stale.
+    SMART_CANCEL_THRESHOLD_PCT = 1.5
 
     def __init__(self, client, risk_manager, fill_tracker=None):
         """
