@@ -32,6 +32,13 @@ class OrderExecutor:
         LIVE            — places real orders on Coinbase Advanced Trade
     """
 
+    # Track last grid center price per symbol for smart cancel logic
+    _last_grid_prices = {}
+
+    # Only cancel + re-place if price moved more than this % from last grid
+    # Must be tighter than grid spacing so orders don't drift away from market
+    SMART_CANCEL_THRESHOLD_PCT = 0.4
+
     def __init__(self, client, risk_manager):
         """
         Args:
@@ -119,7 +126,14 @@ class OrderExecutor:
         current_equity: float,
         current_exposure: float,
     ) -> dict:
-        """Place 5 buy + 5 sell limit orders for the grid strategy."""
+        """
+        Place grid buy/sell limit orders.
+
+        Smart execution:
+        - Only places BUY orders if we have enough cash (USDC/USD)
+        - Only places SELL orders if we hold enough coins to sell
+        - Tracks remaining available balance to avoid INSUFFICIENT_FUND errors
+        """
         orders = []
         total_cost = grid_levels["total_capital_deployed"]
 
@@ -142,8 +156,72 @@ class OrderExecutor:
                     ),
                 }
 
-        # ----- Place BUY limit orders -----
+        # ----- Smart cancel: only replace orders if price moved significantly -----
+        current_price = grid_levels["current_price"]
+        if not self.paper_mode:
+            last_price = self._last_grid_prices.get(symbol)
+            if last_price is not None:
+                price_move_pct = abs(current_price - last_price) / last_price * 100
+                if price_move_pct < self.SMART_CANCEL_THRESHOLD_PCT:
+                    logger.info(
+                        f"Smart cancel SKIP for {symbol} — price moved only "
+                        f"{price_move_pct:.3f}% (threshold: {self.SMART_CANCEL_THRESHOLD_PCT}%). "
+                        f"Keeping existing orders."
+                    )
+                    return {
+                        "action": "GRID",
+                        "paper_mode": self.paper_mode,
+                        "orders": [],
+                        "summary": (
+                            f"Grid kept — price moved only {price_move_pct:.2f}% "
+                            f"(need {self.SMART_CANCEL_THRESHOLD_PCT}% to re-place)."
+                        ),
+                    }
+
+            # Price moved enough (or first run) — cancel and re-place
+            cancelled = self.client.cancel_open_orders(product_id=symbol)
+            if cancelled > 0:
+                logger.info(f"Cancelled {cancelled} old {symbol} orders before new grid")
+
+            # Record the price we're placing the grid around
+            self._last_grid_prices[symbol] = current_price
+
+        # ----- Check actual holdings before placing orders -----
+        # Get available cash (for buys) and coin balance (for sells)
+        available_cash = current_equity - current_exposure  # rough available cash
+        try:
+            accounts = self.client.get_accounts()
+            # Sum all cash-like balances
+            cash_currencies = {"USD", "USDC", "USDT", "DAI", "GUSD", "USDP"}
+            available_cash = 0.0
+            for acct in accounts:
+                if acct["currency"] in cash_currencies:
+                    available_cash += float(acct["available"])
+
+            # Get coin balance for the base currency (e.g., "PEPE" from "PEPE-USDC")
+            base_currency = symbol.split("-")[0]
+            available_coins = 0.0
+            for acct in accounts:
+                if acct["currency"] == base_currency:
+                    available_coins += float(acct["available"])
+        except Exception as e:
+            logger.warning(f"Could not fetch account balances: {e}")
+            available_coins = 0.0
+
+        logger.info(f"Grid execution — available cash: ${available_cash:.2f}, "
+                     f"available {symbol.split('-')[0]} coins: {available_coins:.2f}")
+
+        # ----- Place BUY limit orders (only if we have cash) -----
+        remaining_cash = available_cash
+        buys_placed = 0
         for level in grid_levels["buy_levels"]:
+            order_cost = level["size_usd"]
+            if remaining_cash < order_cost:
+                logger.warning(
+                    f"Skipping GRID-B{level['level']} — need ${order_cost:.2f} "
+                    f"but only ${remaining_cash:.2f} cash remaining"
+                )
+                continue
             order = self._place_limit_order(
                 symbol=symbol,
                 side="BUY",
@@ -152,9 +230,21 @@ class OrderExecutor:
                 tag=f"GRID-B{level['level']}",
             )
             orders.append(order)
+            if order["status"] == "placed":
+                remaining_cash -= order_cost
+                buys_placed += 1
 
-        # ----- Place SELL limit orders -----
+        # ----- Place SELL limit orders (only if we hold enough coins) -----
+        remaining_coins = available_coins
+        sells_placed = 0
         for level in grid_levels["sell_levels"]:
+            coins_needed = level["size_coins"]
+            if remaining_coins < coins_needed:
+                logger.info(
+                    f"Skipping GRID-S{level['level']} — need {coins_needed:.0f} coins "
+                    f"but only {remaining_coins:.0f} available"
+                )
+                continue
             order = self._place_limit_order(
                 symbol=symbol,
                 side="SELL",
@@ -163,6 +253,9 @@ class OrderExecutor:
                 tag=f"GRID-S{level['level']}",
             )
             orders.append(order)
+            if order["status"] == "placed":
+                remaining_coins -= coins_needed
+                sells_placed += 1
 
         placed = sum(1 for o in orders if o["status"] == "placed")
         simulated = sum(1 for o in orders if o["status"] == "simulated")
@@ -276,9 +369,16 @@ class OrderExecutor:
         order_id = str(uuid.uuid4())[:8]
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        # Format for Coinbase: price and size as strings
-        price_str = f"{price:.10f}"
-        size_str = f"{size_coins:.10f}"
+        # Get allowed precision from Coinbase product info
+        precision = self.client.get_product_precision(symbol)
+        price_dec = precision["price_decimals"]
+        size_dec = precision["size_decimals"]
+
+        # Round and format to the exact precision Coinbase allows
+        price = round(price, price_dec)
+        size_coins = round(size_coins, size_dec)
+        price_str = f"{price:.{price_dec}f}"
+        size_str = f"{size_coins:.{size_dec}f}"
 
         order_record = {
             "order_id": order_id,
@@ -317,8 +417,17 @@ class OrderExecutor:
                         limit_price=price_str,
                     )
 
-                if response.get("success"):
-                    cb_order_id = response["success_response"]["order_id"]
+                # SDK returns an object, not a dict — handle both
+                resp = response if isinstance(response, dict) else response.__dict__ if hasattr(response, '__dict__') else {}
+
+                # Try object attributes first, then dict keys
+                success = getattr(response, 'success', None) or (resp.get('success') if isinstance(resp, dict) else None)
+                success_resp = getattr(response, 'success_response', None) or (resp.get('success_response') if isinstance(resp, dict) else None)
+                error_resp = getattr(response, 'error_response', None) or (resp.get('error_response') if isinstance(resp, dict) else None)
+
+                if success:
+                    sr = success_resp if isinstance(success_resp, dict) else (success_resp.__dict__ if hasattr(success_resp, '__dict__') else {})
+                    cb_order_id = sr.get("order_id", getattr(success_resp, 'order_id', 'unknown'))
                     order_record["status"] = "placed"
                     order_record["coinbase_order_id"] = cb_order_id
                     logger.info(
@@ -326,11 +435,11 @@ class OrderExecutor:
                         f"@ ${price_str} — order_id: {cb_order_id}"
                     )
                 else:
-                    error = response.get("error_response", {})
+                    er = error_resp if isinstance(error_resp, dict) else (error_resp.__dict__ if hasattr(error_resp, '__dict__') else str(error_resp))
                     order_record["status"] = "failed"
-                    order_record["error"] = str(error)
+                    order_record["error"] = str(er)
                     logger.error(
-                        f"[LIVE] {tag} FAILED: {error}"
+                        f"[LIVE] {tag} FAILED: {er}"
                     )
             except Exception as e:
                 order_record["status"] = "failed"
@@ -356,6 +465,14 @@ class OrderExecutor:
         order_id = str(uuid.uuid4())[:8]
         timestamp = datetime.now(timezone.utc).isoformat()
 
+        # Get allowed precision from Coinbase product info
+        precision = self.client.get_product_precision(symbol)
+        size_dec = precision["size_decimals"]
+
+        # Round size to allowed precision
+        if size_coins is not None:
+            size_coins = round(size_coins, size_dec)
+
         order_record = {
             "order_id": order_id,
             "tag": tag,
@@ -377,7 +494,7 @@ class OrderExecutor:
                 )
             else:
                 logger.info(
-                    f"[PAPER] {tag} MARKET SELL {size_coins:.10f} {symbol}"
+                    f"[PAPER] {tag} MARKET SELL {size_coins:.{size_dec}f} {symbol}"
                 )
         else:
             try:
@@ -391,21 +508,29 @@ class OrderExecutor:
                     response = self.client.client.market_order_sell(
                         client_order_id=order_id,
                         product_id=symbol,
-                        base_size=f"{size_coins:.10f}",
+                        base_size=f"{size_coins:.{size_dec}f}",
                     )
 
-                if response.get("success"):
-                    cb_order_id = response["success_response"]["order_id"]
+                # SDK returns an object, not a dict — handle both
+                resp = response if isinstance(response, dict) else response.__dict__ if hasattr(response, '__dict__') else {}
+
+                success = getattr(response, 'success', None) or (resp.get('success') if isinstance(resp, dict) else None)
+                success_resp = getattr(response, 'success_response', None) or (resp.get('success_response') if isinstance(resp, dict) else None)
+                error_resp = getattr(response, 'error_response', None) or (resp.get('error_response') if isinstance(resp, dict) else None)
+
+                if success:
+                    sr = success_resp if isinstance(success_resp, dict) else (success_resp.__dict__ if hasattr(success_resp, '__dict__') else {})
+                    cb_order_id = sr.get("order_id", getattr(success_resp, 'order_id', 'unknown'))
                     order_record["status"] = "placed"
                     order_record["coinbase_order_id"] = cb_order_id
                     logger.info(
                         f"[LIVE] {tag} MARKET {side} — order_id: {cb_order_id}"
                     )
                 else:
-                    error = response.get("error_response", {})
+                    er = error_resp if isinstance(error_resp, dict) else (error_resp.__dict__ if hasattr(error_resp, '__dict__') else str(error_resp))
                     order_record["status"] = "failed"
-                    order_record["error"] = str(error)
-                    logger.error(f"[LIVE] {tag} MARKET FAILED: {error}")
+                    order_record["error"] = str(er)
+                    logger.error(f"[LIVE] {tag} MARKET FAILED: {er}")
 
             except Exception as e:
                 order_record["status"] = "failed"

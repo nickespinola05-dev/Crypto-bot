@@ -29,7 +29,7 @@ from strategies.position_manager import PositionManager
 from utils.risk_manager import RiskManager
 from utils.telegram_alerts import TelegramAlerts
 from utils.shared_state import write_state, write_shutdown
-from utils.pnl_tracker import record_equity
+from utils.pnl_tracker import record_equity, record_paper_profit
 from utils.logger import logger
 
 
@@ -139,10 +139,11 @@ def send_daily_summary_if_needed():
 
 def run_full_trading_cycle():
     """
-    One complete pass of the trading pipeline:
-        fetch -> indicators -> regime -> grid -> momentum -> hybrid
-        -> extreme volatility check -> risk check -> execute orders
-        -> Telegram alerts -> print reports.
+    One complete pass of the trading pipeline — loops through ALL configured pairs:
+        For each pair:
+            fetch -> indicators -> regime -> grid -> momentum -> hybrid
+            -> extreme volatility check -> risk check -> execute orders
+            -> Telegram alerts -> print reports.
     """
     global cycle_count, daily_cycle_count, start_of_day_equity_global
     cycle_count += 1
@@ -155,7 +156,7 @@ def run_full_trading_cycle():
     send_daily_summary_if_needed()
 
     try:
-        # ----- LIVE BALANCE REFRESH (every cycle — always fresh from API) -----
+        # ----- LIVE BALANCE REFRESH (once per cycle — shared across all pairs) -----
         live_equity_info = pos_mgr.get_account_equity()   # force fresh API call
         live_equity = live_equity_info["total_equity"]
         print(f"[DEBUG] Balance refresh complete - using ${live_equity:.2f} equity")
@@ -164,9 +165,126 @@ def run_full_trading_cycle():
               f"(cash: ${live_equity_info['cash_usd']:,.4f} + "
               f"coins: ${live_equity_info['coin_value_usd']:,.4f})")
 
+        # ----- Loop through ALL trading pairs -----
+        all_pairs = settings.TRADING_PAIRS
+        all_state_orders = []
+        all_state_alerts = []
+        last_dec = None
+        last_reason = ""
+        last_risk = None
+        last_symbol = all_pairs[0] if all_pairs else "DOGE-USDC"
+
+        for pair_idx, symbol in enumerate(all_pairs):
+            print(f"\n{'#' * 60}")
+            print(f"  PAIR {pair_idx + 1}/{len(all_pairs)}: {symbol}")
+            print(f"{'#' * 60}")
+
+            pair_result = _run_pair_cycle(
+                symbol=symbol,
+                cycle_start=cycle_start,
+                live_equity=live_equity,
+                live_equity_info=live_equity_info,
+            )
+
+            # Collect results from this pair
+            all_state_orders.extend(pair_result["state_orders"])
+            all_state_alerts.extend(pair_result["state_alerts"])
+            last_dec = pair_result["decision"]
+            last_reason = pair_result["reason"]
+            last_risk = pair_result["risk"]
+            last_symbol = symbol
+
+        # =================================================================
+        #  WRITE SHARED STATE (combined across all pairs)
+        # =================================================================
+        current_equity = live_equity
+        positions = pos_mgr.get_current_positions()
+        equity_info = pos_mgr.get_account_equity(positions)
+        current_equity = equity_info["total_equity"]
+        total_exposure = pos_mgr.calculate_total_exposure(positions)
+
+        # Set start-of-day equity on first cycle of the day
+        if start_of_day_equity_global is None:
+            start_of_day_equity_global = current_equity
+
+        peak_equity = pos_mgr.update_peak_equity(current_equity)
+
+        risk = risk_mgr.get_risk_summary(
+            current_equity=current_equity,
+            start_of_day_equity=start_of_day_equity_global,
+            peak_equity=peak_equity,
+            current_exposure_usd=total_exposure,
+        )
+
+        write_state(
+            cycle_count=cycle_count,
+            daily_cycle_count=daily_cycle_count,
+            last_decision={"symbol": last_symbol, "decision": last_dec, "reason": last_reason[:120]},
+            last_orders=all_state_orders,
+            alerts=all_state_alerts,
+            risk_summary={
+                "daily_pnl_pct": risk["daily_pnl_pct"],
+                "drawdown_pct": risk["drawdown_pct"],
+                "exposure_pct": risk["exposure_pct"],
+                "trading_allowed": risk["trading_allowed"],
+            },
+            equity_snapshot={
+                "total_equity": current_equity,
+                "peak_equity": peak_equity,
+                "cash_usd": equity_info["cash_usd"],
+            },
+            bot_running=True,
+        )
+
+        # Record equity for persistent P/L tracking
+        record_equity(current_equity)
+
+        # =================================================================
+        #  CYCLE COMPLETE
+        # =================================================================
+        cycle_end = datetime.now(timezone.utc)
+        elapsed = (cycle_end - cycle_start).total_seconds()
+
+        print(f"\n  Time: {cycle_end.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print(f"  Cycle {cycle_count} completed in {elapsed:.1f}s — traded {len(all_pairs)} pairs")
+        print(f"  Next cycle in 5 minutes...")
+        print("=" * 60 + "\n")
+
+        logger.info(
+            f"Cycle {cycle_count} complete — "
+            f"{len(all_pairs)} pairs — {elapsed:.1f}s elapsed"
+        )
+
+    except Exception as e:
+        logger.error(f"Cycle {cycle_count} FAILED: {e}")
+        print(f"\n  [ERROR] Cycle {cycle_count} failed: {e}")
+        print(f"  Will retry next cycle in 5 minutes...\n")
+        # Alert on errors too
+        try:
+            alerts.send_risk_alert(f"Cycle {cycle_count} FAILED: {e}")
+        except Exception:
+            pass  # Don't crash if Telegram also fails
+
+
+# Track last grid prices per symbol for smart cancel logic
+_last_grid_prices = {}
+
+
+def _run_pair_cycle(symbol: str, cycle_start, live_equity: float, live_equity_info: dict) -> dict:
+    """
+    Run one full analysis + execution cycle for a single trading pair.
+
+    Returns:
+        dict with: state_orders, state_alerts, decision, reason, risk
+    """
+    global start_of_day_equity_global
+
+    try:
         # ----- Fetch candles -----
-        symbol = "PEPE-USD"
-        df_raw = fetcher.get_recent_candles(symbol, granularity="FIVE_MINUTE", limit=100)
+        # Candle data: use -USD version (Coinbase has more liquidity/data on USD pairs)
+        # Orders will go through the actual symbol (e.g. DOGE-USDC) so they match your balance
+        candle_symbol = symbol.replace("-USDC", "-USD").replace("-USDT", "-USD")
+        df_raw = fetcher.get_recent_candles(candle_symbol, granularity="FIVE_MINUTE", limit=100)
 
         # ----- Add technical indicators -----
         df = add_indicators(df_raw)
@@ -383,82 +501,40 @@ def run_full_trading_cycle():
         alerts.send_decision_alert(dec, symbol, details)
 
         # =================================================================
-        #  RISK & POSITION REPORT
+        #  RISK CHECK (quick — uses cached equity from parent)
         # =================================================================
         positions = pos_mgr.get_current_positions()
         equity_info = pos_mgr.get_account_equity(positions)
         total_exposure = pos_mgr.calculate_total_exposure(positions)
-
         current_equity = equity_info["total_equity"]
 
-        # Set start-of-day equity on first cycle of the day
         if start_of_day_equity_global is None:
             start_of_day_equity_global = current_equity
 
-        start_of_day_equity = start_of_day_equity_global
         peak_equity = pos_mgr.update_peak_equity(current_equity)
 
         risk = risk_mgr.get_risk_summary(
             current_equity=current_equity,
-            start_of_day_equity=start_of_day_equity,
+            start_of_day_equity=start_of_day_equity_global,
             peak_equity=peak_equity,
             current_exposure_usd=total_exposure,
         )
 
-        print("\n" + "=" * 60)
-        print(f"  RISK & POSITION REPORT")
-        print("=" * 60)
+        print(f"\n  Risk: exposure {risk['exposure_pct']:.1f}%, "
+              f"daily P&L {risk['daily_pnl_pct']:+.2f}%, "
+              f"drawdown {risk['drawdown_pct']:.2f}% — "
+              f"{'OK' if risk['trading_allowed'] else 'BLOCKED'}")
 
-        print(f"\n  Account Overview:")
-        print(f"    Cash (USD)       : ${equity_info['cash_usd']:.4f}")
-        print(f"    Coin holdings    : ${equity_info['coin_value_usd']:.6f}")
-        print(f"    Total equity     : ${risk['current_equity']:.4f}")
-        print(f"    Peak equity      : ${risk['peak_equity']:.4f}")
-
-        print(f"\n  Current Positions:")
-        if positions:
-            print(f"  {'Symbol':<12} {'Coins':<22} {'Price':<18} {'Value USD':<12}")
-            print(f"  {'-'*12} {'-'*22} {'-'*18} {'-'*12}")
-            for sym, pos in positions.items():
-                print(
-                    f"  {sym:<12} {pos['size_coins']:<22.10f} "
-                    f"${pos['current_price']:<17.10f} ${pos['value_usd']:<11.6f}"
-                )
-        else:
-            print(f"    (no coin positions)")
-
-        print(f"\n  Risk Metrics:")
-        print(f"    Exposure         : ${risk['current_exposure_usd']:.4f}  "
-              f"({risk['exposure_pct']:.1f}% of equity)")
-        print(f"    Max per coin     : ${risk['max_position_usd']:.2f}  "
-              f"({risk['max_position_pct']}% limit)")
-        print(f"    Daily P&L        : ${risk['daily_pnl_usd']:+.4f}  "
-              f"({risk['daily_pnl_pct']:+.2f}%)")
-        print(f"    Drawdown         : ${risk['drawdown_usd']:.4f}  "
-              f"({risk['drawdown_pct']:.2f}% from peak)")
-
-        print(f"\n  Safety Limits:")
-        daily_status = "BREACHED" if risk["daily_loss_breached"] else "OK"
-        dd_status = "BREACHED" if risk["drawdown_breached"] else "OK"
-        print(f"    Daily loss limit : {risk['daily_loss_limit_pct']}%  — [{daily_status}]")
-        print(f"    Max drawdown     : {risk['max_drawdown_pct']}%  — [{dd_status}]")
-
-        print(f"\n  {'=' * 50}")
-        if risk["trading_allowed"]:
-            print(f"  [OK]  ALL RISK CHECKS PASSED — TRADING ALLOWED")
-        else:
-            print(f"  [XX]  RISK LIMIT BREACHED — TRADING HALTED")
-            # Send Telegram risk alert
+        if not risk["trading_allowed"]:
             alerts.send_risk_alert(
                 f"Risk limit breached on {symbol}! "
                 f"Daily loss: {risk['daily_pnl_pct']:+.2f}%, "
                 f"Drawdown: {risk['drawdown_pct']:.2f}%. "
                 f"Trading is HALTED until limits recover."
             )
-        print(f"  {'=' * 50}")
 
         # =================================================================
-        #  ORDER EXECUTION REPORT
+        #  ORDER EXECUTION
         # =================================================================
         if risk["trading_allowed"]:
             exec_result = executor.execute_plan(
@@ -476,44 +552,27 @@ def run_full_trading_cycle():
                 "summary": "Trading halted — risk limit breached.",
             }
 
-        print("\n" + "=" * 60)
-        print(f"  ORDER EXECUTION REPORT — {symbol}")
-        print("=" * 60)
-
-        mode_label = "PAPER (simulated)" if exec_result["paper_mode"] else "LIVE"
-        print(f"\n  Mode    : {mode_label}")
-        print(f"  Action  : {exec_result['action']}")
-        print(f"  Summary : {exec_result['summary']}")
+        mode_label = "PAPER" if exec_result["paper_mode"] else "LIVE"
+        print(f"\n  [{mode_label}] {exec_result['action']}: {exec_result['summary']}")
 
         orders = exec_result["orders"]
         if orders:
-            print(f"\n  Orders ({len(orders)} total):")
-            print(f"  {'Tag':<12} {'Side':<6} {'Type':<12} {'Price':<22} "
-                  f"{'Size USD':<12} {'Status':<10}")
-            print(f"  {'-'*12} {'-'*6} {'-'*12} {'-'*22} {'-'*12} {'-'*10}")
-
             for o in orders:
                 price_str = f"${o['price']:.10f}" if "price" in o and o["price"] else "MARKET"
                 usd_str = f"${o.get('size_usd', 0):.4f}" if o.get("size_usd") else "—"
-                print(
-                    f"  {o['tag']:<12} {o['side']:<6} {o['type']:<12} "
-                    f"{price_str:<22} {usd_str:<12} {o['status']:<10}"
-                )
+                print(f"    {o['tag']:<12} {o['side']:<6} {price_str:<22} {usd_str:<12} {o['status']}")
 
-            statuses = {}
-            for o in orders:
-                s = o["status"]
-                statuses[s] = statuses.get(s, 0) + 1
-            status_line = ", ".join(f"{v} {k}" for k, v in statuses.items())
-            print(f"\n  Totals: {status_line}")
-        else:
-            print(f"\n  (no orders placed)")
-
-        # --- Send Telegram order alert (only if orders exist) ---
+        # --- Send Telegram alerts ---
         alerts.send_order_alert(exec_result, symbol)
 
+        # Record paper trading profit (estimated grid profit per cycle)
+        if settings.PAPER_TRADING and dec == "GRID":
+            est_profit = grid_levels.get("est_profit_per_cycle", 0)
+            if est_profit > 0:
+                record_paper_profit(est_profit)
+
         # =================================================================
-        #  WRITE SHARED STATE (for dashboard.py)
+        #  BUILD RETURN DATA
         # =================================================================
         state_orders = []
         for o in exec_result.get("orders", []):
@@ -528,13 +587,12 @@ def run_full_trading_cycle():
                 "status": o.get("status", ""),
             })
 
-        state_alerts = []
-        state_alerts.append({
+        state_alerts = [{
             "timestamp": cycle_start.strftime("%Y-%m-%d %H:%M:%S"),
             "symbol": symbol,
             "type": "decision",
             "message": f"{dec} — {decision['reason'][:100]}",
-        })
+        }]
         if not risk["trading_allowed"]:
             state_alerts.append({
                 "timestamp": cycle_start.strftime("%Y-%m-%d %H:%M:%S"),
@@ -550,54 +608,29 @@ def run_full_trading_cycle():
                 "message": f"Extreme volatility! ATR% = {atr_pct:.3f}% — forced WAIT",
             })
 
-        write_state(
-            cycle_count=cycle_count,
-            daily_cycle_count=daily_cycle_count,
-            last_decision={"symbol": symbol, "decision": dec, "reason": decision["reason"][:120]},
-            last_orders=state_orders,
-            alerts=state_alerts,
-            risk_summary={
-                "daily_pnl_pct": risk["daily_pnl_pct"],
-                "drawdown_pct": risk["drawdown_pct"],
-                "exposure_pct": risk["exposure_pct"],
-                "trading_allowed": risk["trading_allowed"],
-            },
-            equity_snapshot={
-                "total_equity": current_equity,
-                "peak_equity": peak_equity,
-                "cash_usd": equity_info["cash_usd"],
-            },
-            bot_running=True,
-        )
-
-        # Record equity for persistent P/L tracking
-        record_equity(current_equity)
-
-        # =================================================================
-        #  CYCLE COMPLETE
-        # =================================================================
-        cycle_end = datetime.now(timezone.utc)
-        elapsed = (cycle_end - cycle_start).total_seconds()
-
-        print(f"\n  Time: {cycle_end.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        print(f"  Cycle {cycle_count} completed in {elapsed:.1f}s")
-        print(f"  Next cycle in 5 minutes...")
-        print("=" * 60 + "\n")
-
-        logger.info(
-            f"Cycle {cycle_count} complete — "
-            f"{exec_result['action']} — {elapsed:.1f}s elapsed"
-        )
+        return {
+            "state_orders": state_orders,
+            "state_alerts": state_alerts,
+            "decision": dec,
+            "reason": decision["reason"][:120],
+            "risk": risk,
+        }
 
     except Exception as e:
-        logger.error(f"Cycle {cycle_count} FAILED: {e}")
-        print(f"\n  [ERROR] Cycle {cycle_count} failed: {e}")
-        print(f"  Will retry next cycle in 5 minutes...\n")
-        # Alert on errors too
-        try:
-            alerts.send_risk_alert(f"Cycle {cycle_count} FAILED: {e}")
-        except Exception:
-            pass  # Don't crash if Telegram also fails
+        logger.error(f"Pair {symbol} FAILED in cycle {cycle_count}: {e}")
+        print(f"\n  [ERROR] {symbol} failed: {e}")
+        return {
+            "state_orders": [],
+            "state_alerts": [{
+                "timestamp": cycle_start.strftime("%Y-%m-%d %H:%M:%S"),
+                "symbol": symbol,
+                "type": "error",
+                "message": f"{symbol} cycle error: {str(e)[:80]}",
+            }],
+            "decision": "ERROR",
+            "reason": str(e)[:120],
+            "risk": None,
+        }
 
 
 # =====================================================================
@@ -616,7 +649,7 @@ def run_backtest_mode():
     print("#" + " " * 58 + "#")
     print("#" * 60)
 
-    symbol = "PEPE-USD"
+    symbol = settings.TRADING_PAIRS[0] if settings.TRADING_PAIRS else "PEPE-USD"
     days_back = 7
     initial_capital = 1000.0
 

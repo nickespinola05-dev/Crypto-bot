@@ -138,6 +138,112 @@ class CoinbaseClient:
         return candles
 
     # ------------------------------------------------------------------
+    #  PRODUCT PRECISION (for order placement)
+    # ------------------------------------------------------------------
+
+    _product_cache = {}  # Class-level cache: product_id -> precision dict
+
+    def get_product_precision(self, product_id: str) -> dict:
+        """
+        Get the allowed price and size precision for a trading pair.
+
+        Returns:
+            dict with:
+                quote_increment: str   (min price step, e.g. "0.00000001")
+                base_increment:  str   (min size step, e.g. "1")
+                price_decimals:  int   (number of decimal places for price)
+                size_decimals:   int   (number of decimal places for size)
+                min_market_funds: str  (min USD for market buy)
+        """
+        if product_id in self._product_cache:
+            return self._product_cache[product_id]
+
+        try:
+            product = self.client.get_product(product_id)
+
+            quote_inc = getattr(product, 'quote_increment', '0.01')
+            base_inc = getattr(product, 'base_increment', '0.00000001')
+            min_funds = getattr(product, 'quote_min_size', '1')
+
+            # Count decimal places from the increment string
+            def count_decimals(s: str) -> int:
+                s = str(s)
+                if '.' in s:
+                    return len(s.rstrip('0').split('.')[1])
+                return 0
+
+            result = {
+                "quote_increment": str(quote_inc),
+                "base_increment": str(base_inc),
+                "price_decimals": count_decimals(quote_inc),
+                "size_decimals": count_decimals(base_inc),
+                "min_market_funds": str(min_funds),
+            }
+            self._product_cache[product_id] = result
+            logger.info(
+                f"Product {product_id} precision: "
+                f"price={result['price_decimals']} decimals, "
+                f"size={result['size_decimals']} decimals"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to get product precision for {product_id}: {e}")
+            # Fallback: 8 decimals for price, 0 for size (conservative)
+            return {
+                "quote_increment": "0.00000001",
+                "base_increment": "1",
+                "price_decimals": 8,
+                "size_decimals": 0,
+                "min_market_funds": "1",
+            }
+
+    # ------------------------------------------------------------------
+    #  ORDER MANAGEMENT
+    # ------------------------------------------------------------------
+
+    def cancel_open_orders(self, product_id: str = None) -> int:
+        """
+        Cancel all open orders, optionally filtered by product_id.
+
+        Args:
+            product_id: e.g. "DOGE-USDC" — if None, cancels ALL open orders.
+
+        Returns:
+            Number of orders cancelled.
+        """
+        try:
+            if product_id:
+                response = self.client.list_orders(
+                    product_id=product_id,
+                    order_status=["OPEN"],
+                    limit=250,
+                )
+            else:
+                response = self.client.list_orders(
+                    order_status=["OPEN"],
+                    limit=250,
+                )
+
+            orders = response.orders if hasattr(response, 'orders') else []
+            if not orders:
+                return 0
+
+            order_ids = [o.order_id for o in orders]
+            if order_ids:
+                self.client.cancel_orders(order_ids=order_ids)
+                logger.info(
+                    f"Cancelled {len(order_ids)} open orders"
+                    + (f" for {product_id}" if product_id else "")
+                )
+
+            return len(order_ids)
+
+        except Exception as e:
+            logger.error(f"Failed to cancel open orders: {e}")
+            return 0
+
+    # ------------------------------------------------------------------
     #  HEALTH CHECK
     # ------------------------------------------------------------------
 

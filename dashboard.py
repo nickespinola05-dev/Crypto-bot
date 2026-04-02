@@ -908,11 +908,21 @@ def load_standalone_data() -> dict:
             current = pnl_data.get("last_equity", starting)
             now = datetime.now(ZoneInfo("America/New_York"))
             today_str = now.strftime("%Y-%m-%d")
-            today_data = pnl_data.get("days", {}).get(today_str, {})
-            today_open = today_data.get("open_equity", current)
-            daily_pnl = current - today_open
-            daily_pct = (daily_pnl / today_open * 100) if today_open > 0 else 0
-            alltime_pnl = current - starting
+
+            # Check for paper trading profit data
+            has_paper = "paper_profit_total" in pnl_data
+            if has_paper:
+                alltime_pnl = pnl_data.get("paper_profit_total", 0)
+                daily_data = pnl_data.get("paper_daily", {}).get(today_str, {})
+                daily_pnl = daily_data.get("profit", 0)
+                current = starting + alltime_pnl
+            else:
+                today_data = pnl_data.get("days", {}).get(today_str, {})
+                today_open = today_data.get("open_equity", current)
+                daily_pnl = current - today_open
+                alltime_pnl = current - starting
+
+            daily_pct = (daily_pnl / starting * 100) if starting > 0 else 0
             alltime_pct = (alltime_pnl / starting * 100) if starting > 0 else 0
             data["pnl_summary"] = {
                 "starting_equity": round(starting, 4),
@@ -1404,13 +1414,22 @@ with center:
     alltime_pnl = pnl["alltime_pnl"]
     alltime_pct = pnl["alltime_pnl_pct"]
 
-    d_cls = "pnl-green" if daily_pnl > 0 else ("pnl-red" if daily_pnl < 0 else "pnl-flat")
+    # Dead zone: treat anything under $0.01 as flat (prevents flashing red from rounding)
+    d_cls = "pnl-green" if daily_pnl > 0.01 else ("pnl-red" if daily_pnl < -0.01 else "pnl-flat")
     d_sign = "+" if daily_pnl >= 0 else ""
-    a_cls = "pnl-green" if alltime_pnl > 0 else ("pnl-red" if alltime_pnl < 0 else "pnl-flat")
+    a_cls = "pnl-green" if alltime_pnl > 0.01 else ("pnl-red" if alltime_pnl < -0.01 else "pnl-flat")
     a_sign = "+" if alltime_pnl >= 0 else ""
 
-    # Open orders count
-    order_count = len(bot_state.get("orders_history", []))
+    # Open orders count — query Coinbase for REAL open orders
+    try:
+        if not STANDALONE_MODE:
+            resp = client.client.list_orders(order_status=["OPEN"], limit=250)
+            open_orders_list = resp.orders if hasattr(resp, 'orders') else []
+            order_count = len(open_orders_list)
+        else:
+            order_count = len(bot_state.get("orders_history", []))
+    except Exception:
+        order_count = len(bot_state.get("orders_history", []))
 
     st.markdown('<div class="section-label">Portfolio</div>', unsafe_allow_html=True)
 
@@ -1435,8 +1454,40 @@ with center:
     </div>
     """, unsafe_allow_html=True)
 
-    # Open orders list from bot state
-    state_orders = bot_state.get("orders_history", [])
+    # Open orders table — show ONLY currently open orders from Coinbase
+    try:
+        if not STANDALONE_MODE:
+            _resp = client.client.list_orders(order_status=["OPEN"], limit=250)
+            _open_list = _resp.orders if hasattr(_resp, 'orders') else []
+            state_orders = []
+            for _o in _open_list:
+                _sym = getattr(_o, 'product_id', '')
+                _side = getattr(_o, 'side', 'BUY')
+                _cfg = getattr(_o, 'order_configuration', None)
+                _price = 0.0
+                _size_usd = 0.0
+                if _cfg:
+                    _gtc = getattr(_cfg, 'limit_limit_gtc', None)
+                    if _gtc:
+                        _price = float(getattr(_gtc, 'limit_price', 0))
+                        _base = float(getattr(_gtc, 'base_size', 0))
+                        _size_usd = _price * _base
+                _created = getattr(_o, 'created_time', '')
+                state_orders.append({
+                    "timestamp": _created,
+                    "symbol": _sym,
+                    "side": _side,
+                    "type": "limit_gtc",
+                    "price": _price,
+                    "size_usd": _size_usd,
+                    "tag": "",
+                    "status": "placed",
+                })
+        else:
+            state_orders = bot_state.get("orders_history", [])
+    except Exception:
+        state_orders = bot_state.get("orders_history", [])
+
     if state_orders:
         # Build header
         st.markdown(f"""<div style="display:flex; padding:6px 12px; font-size:0.75rem; color:{DIMTEXT};
@@ -1460,7 +1511,7 @@ with center:
             except (ValueError, TypeError):
                 ts = "—"
 
-            coin_short = o.get("symbol", "").replace("-USD", "")
+            coin_short = o.get("symbol", "").split("-")[0]
             side = o.get("side", "")
             order_type = o.get("type", "").replace("_", " ").upper()[:8]
             size_usd = o.get("size_usd")
@@ -1669,7 +1720,7 @@ with right:
             except (ValueError, TypeError):
                 ts = ts_raw[:5] if ts_raw else "—"
 
-            coin_short = o.get("symbol", "").replace("-USD", "")
+            coin_short = o.get("symbol", "").split("-")[0]
             side = o.get("side", "")
             side_cls = "buy" if side == "BUY" else ("sell" if side == "SELL" else "wait")
             side_txt = side if side else "—"
@@ -1697,7 +1748,7 @@ with right:
             d = cd["decision"]["decision"]
             details = cd["decision"]["details"]
             ts = now_local.strftime("%H:%M")
-            coin_short = sym.replace("-USD", "")
+            coin_short = sym.split("-")[0]
 
             if d == "GRID":
                 side_cls = "buy"
@@ -1751,7 +1802,7 @@ with right:
                 ts = ts_raw[:5] if ts_raw else "—"
 
             symbol = a.get("symbol", "")
-            coin_short = symbol.replace("-USD", "") if symbol else ""
+            coin_short = symbol.split("-")[0] if symbol else ""
             msg = a.get("message", "")
             alert_type = a.get("type", "decision")
             bubble_cls = "risk" if alert_type == "risk" else ""
@@ -1784,7 +1835,7 @@ with right:
             d = cd["decision"]["decision"]
             reason = cd["decision"]["reason"][:90]
             ts = now_local.strftime("%H:%M")
-            coin_short = sym.replace("-USD", "")
+            coin_short = sym.split("-")[0]
             feed_html += (
                 f'<div class="feed-bubble">'
                 f'<div class="ts">{ts} &middot; {coin_short}</div>'

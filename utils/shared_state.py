@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 STATE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "state")
 STATE_FILE = os.path.join(STATE_DIR, "bot_state.json")
-MAX_ORDERS = 50   # keep last 50 orders
+MAX_ORDERS = 20   # keep last 20 orders (a few cycles of history)
 MAX_ALERTS = 30   # keep last 30 alerts
 
 
