@@ -103,7 +103,13 @@ class PositionManager:
                 "value_usd": round(value_usd, 6),
             }
 
-        logger.info(f"Found {len(positions)} non-zero positions")
+            logger.info(
+                f"  Position: {currency} = {total_coins:.6f} coins "
+                f"@ ${current_price:.10f} = ${value_usd:.4f}"
+            )
+
+        total_coin_value = sum(p["value_usd"] for p in positions.values())
+        logger.info(f"Found {len(positions)} non-zero positions, total coin value: ${total_coin_value:.4f}")
         return positions
 
     # ------------------------------------------------------------------

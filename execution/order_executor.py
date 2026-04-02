@@ -39,14 +39,16 @@ class OrderExecutor:
     # Must be tighter than grid spacing so orders don't drift away from market
     SMART_CANCEL_THRESHOLD_PCT = 0.4
 
-    def __init__(self, client, risk_manager):
+    def __init__(self, client, risk_manager, fill_tracker=None):
         """
         Args:
             client:       An initialized CoinbaseClient.
             risk_manager: An initialized RiskManager.
+            fill_tracker: An initialized FillTracker (for live order tracking).
         """
         self.client = client
         self.risk_mgr = risk_manager
+        self.fill_tracker = fill_tracker
         self.paper_mode = settings.PAPER_TRADING
 
         mode_str = "PAPER (simulated)" if self.paper_mode else "LIVE (real money!)"
@@ -213,6 +215,7 @@ class OrderExecutor:
 
         # ----- Place BUY limit orders (only if we have cash) -----
         remaining_cash = available_cash
+        grid_spacing_pct = grid_levels.get("grid_spacing_pct", 1.0)
         buys_placed = 0
         for level in grid_levels["buy_levels"]:
             order_cost = level["size_usd"]
@@ -233,6 +236,17 @@ class OrderExecutor:
             if order["status"] == "placed":
                 remaining_cash -= order_cost
                 buys_placed += 1
+                # Register with fill tracker so we know when it fills
+                if self.fill_tracker and order.get("coinbase_order_id"):
+                    self.fill_tracker.register_buy(
+                        coinbase_order_id=order["coinbase_order_id"],
+                        symbol=symbol,
+                        price=order["price"],
+                        size_coins=order["size_coins"],
+                        size_usd=order["size_usd"],
+                        grid_level=level["level"],
+                        grid_spacing_pct=grid_spacing_pct,
+                    )
 
         # ----- Place SELL limit orders (only if we hold enough coins) -----
         remaining_coins = available_coins

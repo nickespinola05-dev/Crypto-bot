@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from config import settings
 from execution.coinbase_client import CoinbaseClient
 from execution.order_executor import OrderExecutor
+from execution.fill_tracker import FillTracker
 from data.fetcher import DataFetcher
 from data.indicators import add_indicators
 from ml.regime_classifier import RegimeClassifier
@@ -44,6 +45,7 @@ risk_mgr = None
 pos_mgr = None
 executor = None
 alerts = None
+fill_tracker = None
 
 cycle_count = 0
 daily_cycle_count = 0
@@ -56,7 +58,7 @@ EXTREME_VOLATILITY_THRESHOLD = 8.0
 
 def initialize():
     """Create all shared objects once at startup."""
-    global client, fetcher, classifier, risk_mgr, pos_mgr, executor, alerts
+    global client, fetcher, classifier, risk_mgr, pos_mgr, executor, alerts, fill_tracker
 
     logger.info("Initializing shared objects...")
 
@@ -67,7 +69,8 @@ def initialize():
     classifier = RegimeClassifier()
     risk_mgr = RiskManager()
     pos_mgr = PositionManager(client)
-    executor = OrderExecutor(client, risk_mgr)
+    fill_tracker = FillTracker(client)
+    executor = OrderExecutor(client, risk_mgr, fill_tracker=fill_tracker)
     alerts = TelegramAlerts()
 
     logger.info("All shared objects initialized successfully.")
@@ -156,6 +159,15 @@ def run_full_trading_cycle():
     send_daily_summary_if_needed()
 
     try:
+        # ----- CHECK FOR FILLED ORDERS (before anything else) -----
+        if not settings.PAPER_TRADING and fill_tracker is not None:
+            print("\n  Checking for filled orders...")
+            fill_results = fill_tracker.check_and_manage_fills()
+            if fill_results["buys_filled"] or fill_results["sells_filled"]:
+                tracker_summary = fill_tracker.get_summary()
+                print(f"  Total realized P&L: ${tracker_summary['total_realized_pnl']:+.4f} "
+                      f"({tracker_summary['total_round_trips']} round-trips)")
+
         # ----- LIVE BALANCE REFRESH (once per cycle — shared across all pairs) -----
         live_equity_info = pos_mgr.get_account_equity()   # force fresh API call
         live_equity = live_equity_info["total_equity"]
@@ -565,11 +577,12 @@ def _run_pair_cycle(symbol: str, cycle_start, live_equity: float, live_equity_in
         # --- Send Telegram alerts ---
         alerts.send_order_alert(exec_result, symbol)
 
-        # Record paper trading profit (estimated grid profit per cycle)
+        # Record paper trading profit (estimated — ONLY in paper mode)
         if settings.PAPER_TRADING and dec == "GRID":
             est_profit = grid_levels.get("est_profit_per_cycle", 0)
             if est_profit > 0:
                 record_paper_profit(est_profit)
+        # In live mode, real profits are tracked by the FillTracker
 
         # =================================================================
         #  BUILD RETURN DATA

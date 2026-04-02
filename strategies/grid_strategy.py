@@ -49,8 +49,9 @@ class GridStrategy:
     FEE_PER_SIDE_PCT = 0.50  # conservative average
 
     # What fraction of max capital to use per coin
-    # With 3 coins at 0.30 each, we deploy ~90% total (10% safety reserve)
-    CAPITAL_FRACTION = 0.30
+    # With 3 coins at 0.25 each, we deploy ~75% total (25% safety reserve)
+    # Reserve ensures we always have cash for counter-sells to work
+    CAPITAL_FRACTION = 0.25
 
     def __init__(
         self,

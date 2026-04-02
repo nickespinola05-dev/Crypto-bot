@@ -42,22 +42,37 @@ class CoinbaseClient:
     #  ACCOUNT / BALANCE
     # ------------------------------------------------------------------
 
-    def get_accounts(self, limit: int = 49) -> list[dict]:
+    def get_accounts(self, limit: int = 250) -> list[dict]:
         """
-        Fetch all accounts (wallets) and return them as a list of dicts.
+        Fetch ALL accounts (wallets) with pagination and return as a list of dicts.
         Each dict has: name, currency, available_balance, hold.
         """
-        response = self.client.get_accounts(limit=limit)
         accounts = []
-        for acct in response.accounts:
-            accounts.append(
-                {
-                    "name": acct.name,
-                    "currency": acct.currency,
-                    "available": acct.available_balance.get("value", "0"),
-                    "hold": acct.hold.get("value", "0") if acct.hold else "0",
-                }
-            )
+        cursor = None
+
+        while True:
+            kwargs = {"limit": limit}
+            if cursor:
+                kwargs["cursor"] = cursor
+
+            response = self.client.get_accounts(**kwargs)
+
+            for acct in response.accounts:
+                accounts.append(
+                    {
+                        "name": acct.name,
+                        "currency": acct.currency,
+                        "available": acct.available_balance.get("value", "0"),
+                        "hold": acct.hold.get("value", "0") if acct.hold else "0",
+                    }
+                )
+
+            # Check if there are more pages
+            if hasattr(response, 'cursor') and response.cursor:
+                cursor = response.cursor
+            else:
+                break
+
         return accounts
 
     def get_balance(self, currency: str = "USD") -> float:
