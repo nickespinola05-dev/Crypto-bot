@@ -9,8 +9,18 @@ Usage anywhere in the project:
 import os
 from dotenv import load_dotenv
 
-# Load .env file from the project root
+# Load .env file from the project root (local development)
 load_dotenv()
+
+# If running on Streamlit Cloud, pull secrets into environment variables
+try:
+    import streamlit as st
+    if hasattr(st, "secrets") and len(st.secrets) > 0:
+        for key, value in st.secrets.items():
+            if isinstance(value, str) and key not in os.environ:
+                os.environ[key] = value
+except Exception:
+    pass  # Not running in Streamlit, or secrets not configured
 
 
 class Settings:
