@@ -187,7 +187,7 @@ class PerformanceExporter:
                     "size_usd": lv["size_usd"],
                     "size_coins": lv["size_coins"],
                     "est_profit": grid_levels["est_profit_per_cycle"] / len(grid_levels["buy_levels"]),
-                    "status": "simulated",
+                    "status": "simulated" if settings.PAPER_TRADING else "live",
                 })
             for lv in grid_levels["sell_levels"]:
                 trades.append({
@@ -199,7 +199,7 @@ class PerformanceExporter:
                     "size_usd": lv["size_usd"],
                     "size_coins": lv["size_coins"],
                     "est_profit": grid_levels["est_profit_per_cycle"] / len(grid_levels["sell_levels"]),
-                    "status": "simulated",
+                    "status": "simulated" if settings.PAPER_TRADING else "live",
                 })
 
         elif dec == "SCALP":
@@ -216,7 +216,7 @@ class PerformanceExporter:
                 "size_usd": settings.MAX_POSITION_SIZE_USD,
                 "size_coins": settings.MAX_POSITION_SIZE_USD / entry if entry > 0 else 0,
                 "est_profit": details.get("potential_profit_pct", potential),
-                "status": "simulated",
+                "status": "simulated" if settings.PAPER_TRADING else "live",
             })
 
         summary = {

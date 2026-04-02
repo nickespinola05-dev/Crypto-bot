@@ -83,6 +83,18 @@ def record_equity(current_equity: float):
     data["last_equity"] = current_equity
     data["last_update"] = now.isoformat()
 
+    # Granular equity snapshots (for equity curve chart)
+    # Keep last 300 data points (~25 hours at 5-min cycles)
+    if "equity_snapshots" not in data:
+        data["equity_snapshots"] = []
+    data["equity_snapshots"].append({
+        "t": now.isoformat(),
+        "eq": round(current_equity, 4),
+    })
+    # Trim to last 300 entries
+    if len(data["equity_snapshots"]) > 300:
+        data["equity_snapshots"] = data["equity_snapshots"][-300:]
+
     _save(data)
 
 

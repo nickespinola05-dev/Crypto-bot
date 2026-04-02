@@ -585,6 +585,7 @@ def _run_pair_cycle(symbol: str, cycle_start, live_equity: float, live_equity_in
                 "size_usd": o.get("size_usd", 0),
                 "tag": o.get("tag", ""),
                 "status": o.get("status", ""),
+                "coinbase_order_id": o.get("coinbase_order_id", None),
             })
 
         state_alerts = [{
