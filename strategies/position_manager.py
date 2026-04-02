@@ -32,15 +32,12 @@ class PositionManager:
         """
         self.client = client
         self.peak_equity = 0.0  # Will be updated as we track equity
-        self._last_equity = None  # Cache of most recent equity call
 
         logger.info("PositionManager initialized")
 
     @property
     def live_equity(self) -> float:
-        """Return the most recent total equity, or fetch fresh if none cached."""
-        if self._last_equity is not None:
-            return self._last_equity
+        """Always fetch fresh equity from Coinbase — no caching."""
         eq = self.get_account_equity()
         return eq["total_equity"]
 
@@ -171,8 +168,8 @@ class PositionManager:
             "total_equity": round(total, 4),
         }
 
-        # Cache for live_equity property
-        self._last_equity = result["total_equity"]
+        # Debug: always confirm what the API returned
+        print(f"[DEBUG] Live equity loaded: ${result['total_equity']:.2f}")
 
         return result
 

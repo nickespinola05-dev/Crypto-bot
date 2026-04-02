@@ -155,9 +155,10 @@ def run_full_trading_cycle():
     send_daily_summary_if_needed()
 
     try:
-        # ----- LIVE BALANCE REFRESH (every cycle) -----
-        live_equity_info = pos_mgr.get_account_equity()
+        # ----- LIVE BALANCE REFRESH (every cycle — always fresh from API) -----
+        live_equity_info = pos_mgr.get_account_equity()   # force fresh API call
         live_equity = live_equity_info["total_equity"]
+        print(f"[DEBUG] Balance refresh complete - using ${live_equity:.2f} equity")
         logger.info(f"Live equity at cycle start: ${live_equity:.4f}")
         print(f"\n  Live equity: ${live_equity:,.4f} "
               f"(cash: ${live_equity_info['cash_usd']:,.4f} + "

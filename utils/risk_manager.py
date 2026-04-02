@@ -177,7 +177,9 @@ class RiskManager:
         Returns:
             Maximum USD allowed for one coin position.
         """
-        return total_capital * (self.max_position_pct / 100)
+        max_usd = total_capital * (self.max_position_pct / 100)
+        print(f"[DEBUG] Max position USD calculated: ${max_usd:.2f} (from ${total_capital:.2f} equity x {self.max_position_pct}%)")
+        return max_usd
 
     # ------------------------------------------------------------------
     #  FULL RISK REPORT
