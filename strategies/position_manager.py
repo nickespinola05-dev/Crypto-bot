@@ -76,24 +76,27 @@ class PositionManager:
                 continue
 
             # Try to get a current price for this coin
-            product_id = f"{currency}-USD"
-            try:
-                candles = self.client.get_candles(
-                    product_id=product_id,
-                    granularity="ONE_MINUTE",
-                    num_candles=1,
-                )
-                if candles:
-                    current_price = candles[-1]["close"]
-                else:
-                    current_price = 0.0
-            except Exception:
-                # Some currencies might not have a USD pair
-                current_price = 0.0
+            # Try USDC pair first (what we actually trade), then fall back to USD
+            current_price = 0.0
+            for quote in ("USDC", "USD"):
+                product_id = f"{currency}-{quote}"
+                try:
+                    candles = self.client.get_candles(
+                        product_id=product_id,
+                        granularity="ONE_MINUTE",
+                        num_candles=1,
+                    )
+                    if candles and candles[-1]["close"] > 0:
+                        current_price = candles[-1]["close"]
+                        break
+                except Exception:
+                    continue
 
             value_usd = total_coins * current_price
 
-            positions[product_id] = {
+            # Use the actual trading pair key (prefer USDC)
+            position_key = f"{currency}-USDC" if current_price > 0 else f"{currency}-USD"
+            positions[position_key] = {
                 "currency": currency,
                 "size_coins": total_coins,
                 "current_price": current_price,

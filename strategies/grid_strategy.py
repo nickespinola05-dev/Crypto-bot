@@ -39,8 +39,14 @@ class GridStrategy:
     ATR_MULTIPLIER_TRENDING = 1.5   # Wider grid when trending (safety buffer)
 
     # Min/max spacing to prevent crazy values
-    MIN_SPACING_PCT = 0.15  # Tighter grid = more fills in calm markets
+    # IMPORTANT: Min must exceed round-trip Coinbase fees (~0.80-1.20%)
+    # to guarantee every filled pair is profitable.
+    MIN_SPACING_PCT = 0.80  # Must be wider than fees to profit
     MAX_SPACING_PCT = 5.0   # Never wider than 5%
+
+    # Estimated Coinbase fee per side (maker ~0.40%, taker ~0.60%)
+    # Used to calculate realistic profit estimates
+    FEE_PER_SIDE_PCT = 0.50  # conservative average
 
     # What fraction of max capital to use per coin
     # With 3 coins at 0.30 each, we deploy ~90% total (10% safety reserve)
@@ -119,16 +125,12 @@ class GridStrategy:
         capital_per_level = total_for_coin / self.NUM_LEVELS
 
         # ----- Step 3: Calculate buy levels (below current price) -----
-        # B1 sits very close to market (0.05% below) for fast fills
-        # B2-B5 fan out at the normal grid spacing from B1
+        # Each level is one full grid spacing apart.
+        # B1 sits one spacing below market — far enough to profit after fees.
         buy_levels = []
-        b1_offset_pct = 0.05  # B1 is just 0.05% below market — almost guaranteed fill
         for i in range(1, self.NUM_LEVELS + 1):
-            if i == 1:
-                level_price = self.current_price * (1 - b1_offset_pct / 100)
-            else:
-                # B2 starts one full spacing below B1, B3 two spacings below B1, etc.
-                level_price = self.current_price * (1 - b1_offset_pct / 100 - (spacing_pct / 100) * (i - 1))
+            # B1 = 1 spacing below, B2 = 2 spacings below, etc.
+            level_price = self.current_price * (1 - (spacing_pct / 100) * i)
             coins_at_level = capital_per_level / level_price
             buy_levels.append(
                 {
@@ -140,15 +142,11 @@ class GridStrategy:
             )
 
         # ----- Step 4: Calculate sell levels (above current price) -----
-        # S1 sits close to market (0.05% above) — mirrors B1
-        # S2-S5 fan out at normal grid spacing
+        # S1 = 1 spacing above, S2 = 2 spacings above, etc.
+        # Each sell is paired with the matching buy for profit calculation.
         sell_levels = []
-        s1_offset_pct = 0.05
         for i in range(1, self.NUM_LEVELS + 1):
-            if i == 1:
-                level_price = self.current_price * (1 + s1_offset_pct / 100)
-            else:
-                level_price = self.current_price * (1 + s1_offset_pct / 100 + (spacing_pct / 100) * (i - 1))
+            level_price = self.current_price * (1 + (spacing_pct / 100) * i)
             # Sell the same number of coins we'd buy at the matching buy level
             coins_at_level = buy_levels[i - 1]["size_coins"]
             sell_levels.append(
@@ -160,11 +158,14 @@ class GridStrategy:
                 }
             )
 
-        # ----- Step 5: Estimate profit per full cycle -----
+        # ----- Step 5: Estimate profit per full cycle (FEE-AWARE) -----
         # A "cycle" = all 5 buys fill, then all 5 sells fill
         total_buy_cost = sum(b["size_usd"] for b in buy_levels)
         total_sell_revenue = sum(s["size_usd"] for s in sell_levels)
-        est_profit = total_sell_revenue - total_buy_cost
+
+        # Subtract estimated fees: fee on each buy + fee on each sell
+        total_fees = (total_buy_cost + total_sell_revenue) * (self.FEE_PER_SIDE_PCT / 100)
+        est_profit = total_sell_revenue - total_buy_cost - total_fees
         est_profit_pct = (est_profit / total_buy_cost) * 100 if total_buy_cost > 0 else 0
 
         result = {
@@ -176,6 +177,7 @@ class GridStrategy:
             "sell_levels": sell_levels,
             "capital_per_level": round(capital_per_level, 2),
             "total_capital_deployed": round(total_buy_cost, 2),
+            "est_fees_per_cycle": round(total_fees, 4),
             "est_profit_per_cycle": round(est_profit, 4),
             "est_profit_pct": round(est_profit_pct, 4),
         }
@@ -183,6 +185,7 @@ class GridStrategy:
         logger.info(
             f"Grid calculated — spacing: {spacing_pct:.2f}%, "
             f"{self.NUM_LEVELS} buy + {self.NUM_LEVELS} sell levels, "
-            f"est. profit/cycle: ${est_profit:.4f} ({est_profit_pct:.2f}%)"
+            f"est. profit/cycle: ${est_profit:.4f} ({est_profit_pct:.2f}%) "
+            f"[after ~${total_fees:.4f} in fees]"
         )
         return result
